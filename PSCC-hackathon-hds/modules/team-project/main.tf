@@ -1,0 +1,365 @@
+#===============================================================================
+# TEAM PROJECT MODULE
+# Creates a project for each participating team with VPC, Bastion, and GPU
+#===============================================================================
+
+locals {
+  # Nettoie le nom d'équipe pour créer un slug valide
+  # Remplace & par "and", espaces par "-", supprime les caractères spéciaux
+  team_slug_raw = lower(replace(replace(var.team_name, "&", "and"), " ", "-"))
+  team_slug     = replace(local.team_slug_raw, "/[^a-z0-9\\-]/", "")
+}
+
+#-------------------------------------------------------------------------------
+# Project
+#-------------------------------------------------------------------------------
+resource "scaleway_account_project" "team" {
+  name        = "${var.project_prefix}-${local.team_slug}"
+  description = "Hackathon HDS - Equipe ${replace(var.team_name, "&", "and")}"
+}
+
+#-------------------------------------------------------------------------------
+# SSH Key
+#-------------------------------------------------------------------------------
+resource "tls_private_key" "team" {
+  algorithm = "ED25519"
+}
+
+resource "scaleway_iam_ssh_key" "team" {
+  name       = "${local.team_slug}-ssh-key"
+  public_key = tls_private_key.team.public_key_openssh
+  project_id = scaleway_account_project.team.id
+}
+
+#-------------------------------------------------------------------------------
+# VPC & Private Network
+#-------------------------------------------------------------------------------
+resource "scaleway_vpc" "team" {
+  name       = "${local.team_slug}-vpc"
+  project_id = scaleway_account_project.team.id
+  region     = var.region
+
+  tags = ["hackathon", local.team_slug]
+}
+
+resource "scaleway_vpc_private_network" "team" {
+  name       = "${local.team_slug}-pn"
+  project_id = scaleway_account_project.team.id
+  region     = var.region
+  vpc_id     = scaleway_vpc.team.id
+
+  ipv4_subnet {
+    subnet = var.private_network_cidr
+  }
+
+  tags = ["hackathon", local.team_slug]
+}
+
+#-------------------------------------------------------------------------------
+# Security Groups
+#-------------------------------------------------------------------------------
+
+# Bastion Security Group - Allow SSH from internet
+resource "scaleway_instance_security_group" "bastion" {
+  project_id              = scaleway_account_project.team.id
+  zone                    = var.zone
+  name                    = "${local.team_slug}-bastion-sg"
+  inbound_default_policy  = "drop"
+  outbound_default_policy = "accept"
+  stateful                = true
+
+  inbound_rule {
+    action   = "accept"
+    port     = var.bastion_ssh_port
+    protocol = "TCP"
+  }
+
+  # Allow ICMP for diagnostics
+  inbound_rule {
+    action   = "accept"
+    protocol = "ICMP"
+  }
+}
+
+# GPU Security Group - No internet access, only private network
+resource "scaleway_instance_security_group" "gpu" {
+  project_id              = scaleway_account_project.team.id
+  zone                    = var.zone
+  name                    = "${local.team_slug}-gpu-sg"
+  inbound_default_policy  = "drop"
+  outbound_default_policy = "drop"
+  stateful                = true
+
+  # Allow SSH from private network only
+  inbound_rule {
+    action   = "accept"
+    port     = 22
+    protocol = "TCP"
+    ip_range = var.private_network_cidr
+  }
+
+  # Allow all traffic from private network (for NAT return traffic)
+  inbound_rule {
+    action   = "accept"
+    protocol = "TCP"
+    ip_range = var.private_network_cidr
+  }
+
+  inbound_rule {
+    action   = "accept"
+    protocol = "UDP"
+    ip_range = var.private_network_cidr
+  }
+
+  inbound_rule {
+    action   = "accept"
+    protocol = "ICMP"
+    ip_range = var.private_network_cidr
+  }
+
+  # Allow outbound to private network (to reach bastion/NAT)
+  outbound_rule {
+    action   = "accept"
+    protocol = "TCP"
+    ip_range = var.private_network_cidr
+  }
+
+  outbound_rule {
+    action   = "accept"
+    protocol = "UDP"
+    ip_range = var.private_network_cidr
+  }
+
+  outbound_rule {
+    action   = "accept"
+    protocol = "ICMP"
+    ip_range = var.private_network_cidr
+  }
+}
+
+#-------------------------------------------------------------------------------
+# Bastion Instance
+#-------------------------------------------------------------------------------
+resource "scaleway_instance_ip" "bastion" {
+  project_id = scaleway_account_project.team.id
+  zone       = var.zone
+
+  tags = ["hackathon", local.team_slug, "bastion"]
+}
+
+resource "scaleway_instance_server" "bastion" {
+  project_id = scaleway_account_project.team.id
+  zone       = var.zone
+  name       = "${local.team_slug}-bastion"
+  type       = var.bastion_instance_type
+  image      = var.bastion_image
+
+  ip_id             = scaleway_instance_ip.bastion.id
+  security_group_id = scaleway_instance_security_group.bastion.id
+
+  root_volume {
+    size_in_gb  = 20
+    volume_type = "sbs_volume"
+    sbs_iops    = 5000
+  }
+
+  user_data = {
+    cloud-init = templatefile("${path.module}/../../scripts/bastion-cloud-init.yaml.tpl", {
+      team_name      = replace(var.team_name, "&", "and")
+      ssh_port       = var.bastion_ssh_port
+      gpu_private_ip = local.gpu_private_ip
+    })
+  }
+
+  tags = ["hackathon", local.team_slug, "bastion"]
+
+  lifecycle {
+    ignore_changes = [user_data]
+  }
+}
+
+resource "scaleway_instance_private_nic" "bastion" {
+  server_id          = scaleway_instance_server.bastion.id
+  private_network_id = scaleway_vpc_private_network.team.id
+  zone               = var.zone
+}
+
+#-------------------------------------------------------------------------------
+# GPU Instance
+#-------------------------------------------------------------------------------
+locals {
+  # Calculate GPU private IP (bastion gets .2, GPU gets .3)
+  network_prefix     = split("/", var.private_network_cidr)[0]
+  network_parts      = split(".", local.network_prefix)
+  gpu_private_ip     = "${local.network_parts[0]}.${local.network_parts[1]}.${local.network_parts[2]}.3"
+  bastion_private_ip = "${local.network_parts[0]}.${local.network_parts[1]}.${local.network_parts[2]}.2"
+}
+
+resource "scaleway_instance_server" "gpu" {
+  project_id = scaleway_account_project.team.id
+  zone       = var.zone
+  name       = "${local.team_slug}-gpu"
+  type       = var.gpu_instance_type
+  image      = var.gpu_image
+
+  security_group_id = scaleway_instance_security_group.gpu.id
+
+  # No public IP
+  ip_id = null
+
+  root_volume {
+    size_in_gb  = var.gpu_root_volume_size_gb
+    volume_type = "sbs_volume"
+    sbs_iops    = var.gpu_root_volume_iops
+  }
+
+  user_data = {
+    cloud-init = templatefile("${path.module}/../../scripts/gpu-cloud-init.yaml.tpl", {
+      team_name             = replace(var.team_name, "&", "and")
+      gpu_type              = var.gpu_instance_type
+      region                = var.region
+      zone1_bucket          = var.zone1_bucket_name
+      livrables_bucket      = var.livrables_bucket_name
+      encryption_key_base64 = var.zone1_encryption_key_base64
+      bastion_private_ip    = local.bastion_private_ip
+      challenge_end_date    = var.challenge_end_date
+    })
+  }
+
+  tags = ["hackathon", local.team_slug, "gpu", var.gpu_instance_type]
+
+  depends_on = [
+    scaleway_instance_server.bastion,
+    scaleway_vpc_private_network.team
+  ]
+}
+
+resource "scaleway_instance_private_nic" "gpu" {
+  server_id          = scaleway_instance_server.gpu.id
+  private_network_id = scaleway_vpc_private_network.team.id
+  zone               = var.zone
+
+  depends_on = [scaleway_instance_server.gpu]
+}
+
+#-------------------------------------------------------------------------------
+# IPAM - Get assigned IPs
+#-------------------------------------------------------------------------------
+data "scaleway_ipam_ip" "bastion" {
+  resource {
+    id   = scaleway_instance_private_nic.bastion.id
+    type = "instance_private_nic"
+  }
+  type = "ipv4"
+
+  depends_on = [scaleway_instance_private_nic.bastion]
+}
+
+data "scaleway_ipam_ip" "gpu" {
+  resource {
+    id   = scaleway_instance_private_nic.gpu.id
+    type = "instance_private_nic"
+  }
+  type = "ipv4"
+
+  depends_on = [scaleway_instance_private_nic.gpu]
+}
+
+#-------------------------------------------------------------------------------
+# Cockpit - Using new specialized resources
+#-------------------------------------------------------------------------------
+resource "scaleway_cockpit_source" "team_metrics" {
+  count          = var.enable_cockpit ? 1 : 0
+  project_id     = scaleway_account_project.team.id
+  name           = "${local.team_slug}-metrics"
+  type           = "metrics"
+  retention_days = 30
+}
+
+resource "scaleway_cockpit_source" "team_logs" {
+  count          = var.enable_cockpit ? 1 : 0
+  project_id     = scaleway_account_project.team.id
+  name           = "${local.team_slug}-logs"
+  type           = "logs"
+  retention_days = 30
+}
+
+#-------------------------------------------------------------------------------
+# Local files - Store SSH keys and credentials
+#-------------------------------------------------------------------------------
+resource "local_sensitive_file" "ssh_private_key" {
+  content         = tls_private_key.team.private_key_openssh
+  filename        = "${path.root}/keys/${local.team_slug}/ssh_private_key.pem"
+  file_permission = "0600"
+}
+
+resource "local_file" "ssh_public_key" {
+  content         = tls_private_key.team.public_key_openssh
+  filename        = "${path.root}/keys/${local.team_slug}/ssh_public_key.pub"
+  file_permission = "0644"
+}
+
+resource "local_file" "team_credentials" {
+  filename        = "${path.root}/keys/${local.team_slug}/credentials.md"
+  file_permission = "0600"
+  content         = <<-EOT
+    # Credentials Hackathon HDS - ${replace(var.team_name, "&", "and")}
+    
+    ## Accès SSH
+    
+    ### Connexion à la VM GPU (via bastion)
+    
+    ```bash
+    ssh -i ssh_private_key.pem -J root@${scaleway_instance_ip.bastion.address}:${var.bastion_ssh_port} root@${data.scaleway_ipam_ip.gpu.address}
+    ```
+    
+    ### Connexion au bastion uniquement
+    
+    ```bash
+    ssh -i ssh_private_key.pem -p ${var.bastion_ssh_port} root@${scaleway_instance_ip.bastion.address}
+    ```
+    
+    ## IPs
+    
+    - Bastion Public IP: ${scaleway_instance_ip.bastion.address}
+    - Bastion Private IP: ${data.scaleway_ipam_ip.bastion.address}
+    - GPU Private IP: ${data.scaleway_ipam_ip.gpu.address}
+    
+    ## Clé de chiffrement S3 (SSE-C)
+    
+    ```
+    ${var.zone1_encryption_key_base64}
+    ```
+    
+    ## API Scaleway (si accès console activé)
+    
+    - Project ID: ${scaleway_account_project.team.id}
+    - Region: ${var.region}
+    - Zone: ${var.zone}
+    
+    ## Configuration initiale sur la VM GPU
+    
+    Après connexion, exécutez:
+    ```bash
+    ./setup-s3.sh <ACCESS_KEY> <SECRET_KEY>
+    ```
+    Les credentials API sont dans le fichier api_credentials.env
+    
+    ## Commandes utiles sur la VM GPU
+    
+    ```bash
+    # Synchroniser les données patients
+    sync-data.sh
+    
+    # Monter Zone 1 en lecture seule
+    mount-s3.sh
+    
+    # Uploader un livrable
+    upload-livrable.sh mon-code.zip
+    ```
+    
+    ## Date limite
+    
+    ${var.challenge_end_date}
+  EOT
+}

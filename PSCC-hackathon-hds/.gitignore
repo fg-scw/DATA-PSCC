@@ -1,0 +1,31 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+.terraform.lock.hcl
+
+# Credentials and keys (NEVER commit these!)
+keys/
+*.pem
+*_key.txt
+api_credentials.env
+
+# Generated files
+ACCESS.md
+dist/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.bak
