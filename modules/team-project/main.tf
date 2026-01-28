@@ -189,59 +189,59 @@ write_files:
       
       # Detect interfaces dynamically
       # Public interface: the one with the default route
-      PUBLIC_IF=$$(ip route | grep '^default' | awk '{print $$5}' | head -1)
+      PUBLIC_IF=$(ip route | grep '^default' | awk '{print $5}' | head -1)
       
       # Private interface: the one with 10.x.x.x address (private network)
-      PRIVATE_IF=$$(ip -o addr show | grep 'inet 10\.' | awk '{print $$2}' | head -1)
+      PRIVATE_IF=$(ip -o addr show | grep 'inet 10\.' | awk '{print $2}' | head -1)
       
-      if [ -z "$$PUBLIC_IF" ] || [ -z "$$PRIVATE_IF" ]; then
+      if [ -z "$PUBLIC_IF" ] || [ -z "$PRIVATE_IF" ]; then
         echo "ERROR: Could not detect interfaces"
-        echo "Public: $$PUBLIC_IF, Private: $$PRIVATE_IF"
+        echo "Public: $PUBLIC_IF, Private: $PRIVATE_IF"
         exit 1
       fi
       
-      echo "Detected: PUBLIC=$$PUBLIC_IF, PRIVATE=$$PRIVATE_IF"
+      echo "Detected: PUBLIC=$PUBLIC_IF, PRIVATE=$PRIVATE_IF"
       
       # Flush existing rules
       iptables -t nat -F POSTROUTING
       iptables -F FORWARD
       
       # Setup NAT (masquerade outgoing traffic from private network)
-      iptables -t nat -A POSTROUTING -o $$PUBLIC_IF -j MASQUERADE
+      iptables -t nat -A POSTROUTING -o $PUBLIC_IF -j MASQUERADE
       
       # Allow forwarding from private to public
-      iptables -A FORWARD -i $$PRIVATE_IF -o $$PUBLIC_IF -j ACCEPT
+      iptables -A FORWARD -i $PRIVATE_IF -o $PUBLIC_IF -j ACCEPT
       
       # Allow return traffic
-      iptables -A FORWARD -i $$PUBLIC_IF -o $$PRIVATE_IF -m state --state RELATED,ESTABLISHED -j ACCEPT
+      iptables -A FORWARD -i $PUBLIC_IF -o $PRIVATE_IF -m state --state RELATED,ESTABLISHED -j ACCEPT
       
       # Save rules
       mkdir -p /etc/iptables
       iptables-save > /etc/iptables/rules.v4
       
-      echo "NAT configured successfully: $$PRIVATE_IF -> $$PUBLIC_IF"
+      echo "NAT configured successfully: $PRIVATE_IF -> $PUBLIC_IF"
 
   - path: /etc/motd
     content: |
-      ══════════════════════════════════════════════════════════════
+      ==============================================================
         HACKATHON HDS - BASTION/NAT - ${replace(var.team_name, "&", "and")}
-      ══════════════════════════════════════════════════════════════
+      ==============================================================
         GPU Access: ssh gpu
         GPU IP: ${local.gpu_private_ip}
         This server provides NAT for the GPU instance.
-      ══════════════════════════════════════════════════════════════
+      ==============================================================
 
 runcmd:
   - systemctl enable fail2ban && systemctl start fail2ban
   - sysctl -p /etc/sysctl.d/99-nat.conf
   # Wait for private network interface to be ready
   - |
-    for i in $$(seq 1 30); do
+    for i in $(seq 1 30); do
       if ip -o addr show | grep -q 'inet 10\.'; then
         echo "Private interface ready"
         break
       fi
-      echo "Waiting for private interface... ($$i/30)"
+      echo "Waiting for private interface... ($i/30)"
       sleep 2
     done
   - /usr/local/bin/setup-nat.sh
@@ -314,37 +314,37 @@ write_files:
       set -e
       
       # Find the private network interface (10.x.x.x)
-      PRIVATE_IF=$$(ip -o addr show | grep 'inet 10\.' | awk '{print $$2}' | head -1)
+      PRIVATE_IF=$(ip -o addr show | grep 'inet 10\.' | awk '{print $2}' | head -1)
       
-      if [ -z "$$PRIVATE_IF" ]; then
+      if [ -z "$PRIVATE_IF" ]; then
         echo "ERROR: Could not detect private interface"
         exit 1
       fi
       
       # Get our IP and subnet
-      OUR_IP=$$(ip -o addr show dev $$PRIVATE_IF | grep 'inet ' | awk '{print $$4}' | cut -d/ -f1)
-      SUBNET_PREFIX=$$(echo $$OUR_IP | cut -d. -f1-3)
+      OUR_IP=$(ip -o addr show dev $PRIVATE_IF | grep 'inet ' | awk '{print $4}' | cut -d/ -f1)
+      SUBNET_PREFIX=$(echo $OUR_IP | cut -d. -f1-3)
       
-      echo "Detected: interface=$$PRIVATE_IF, our_ip=$$OUR_IP, subnet=$$SUBNET_PREFIX.0/24"
+      echo "Detected: interface=$PRIVATE_IF, our_ip=$OUR_IP, subnet=$SUBNET_PREFIX.0/24"
       
       # The bastion is typically at .2 in the subnet (we are at .3 or higher)
       # Try common gateway addresses
       GATEWAY_IP=""
-      for candidate in "$$SUBNET_PREFIX.2" "$$SUBNET_PREFIX.1"; do
-        if [ "$$candidate" != "$$OUR_IP" ]; then
-          echo "Trying gateway candidate: $$candidate"
-          if ping -c 1 -W 2 $$candidate > /dev/null 2>&1; then
-            GATEWAY_IP=$$candidate
-            echo "Found responding gateway: $$GATEWAY_IP"
+      for candidate in "$SUBNET_PREFIX.2" "$SUBNET_PREFIX.1"; do
+        if [ "$candidate" != "$OUR_IP" ]; then
+          echo "Trying gateway candidate: $candidate"
+          if ping -c 1 -W 2 $candidate > /dev/null 2>&1; then
+            GATEWAY_IP=$candidate
+            echo "Found responding gateway: $GATEWAY_IP"
             break
           fi
         fi
       done
       
-      if [ -z "$$GATEWAY_IP" ]; then
-        echo "ERROR: Could not find a responding gateway in $$SUBNET_PREFIX.0/24"
-        echo "Defaulting to $$SUBNET_PREFIX.2"
-        GATEWAY_IP="$$SUBNET_PREFIX.2"
+      if [ -z "$GATEWAY_IP" ]; then
+        echo "ERROR: Could not find a responding gateway in $SUBNET_PREFIX.0/24"
+        echo "Defaulting to $SUBNET_PREFIX.2"
+        GATEWAY_IP="$SUBNET_PREFIX.2"
       fi
       
       # Check if default route already exists
@@ -354,9 +354,9 @@ write_files:
       fi
       
       # Add default route via bastion
-      ip route add default via $$GATEWAY_IP dev $$PRIVATE_IF
+      ip route add default via $GATEWAY_IP dev $PRIVATE_IF
       
-      echo "Default route configured: default via $$GATEWAY_IP dev $$PRIVATE_IF"
+      echo "Default route configured: default via $GATEWAY_IP dev $PRIVATE_IF"
       
       # Verify connectivity
       if ping -c 1 -W 5 8.8.8.8 > /dev/null 2>&1; then
@@ -402,7 +402,7 @@ write_files:
       mkdir -p /data/patients
       rclone sync zone1:${var.zone1_bucket_name} /data/patients/ \
         --s3-sse-customer-algorithm AES256 \
-        --s3-sse-customer-key "$$ENCRYPTION_KEY" \
+        --s3-sse-customer-key "$ENCRYPTION_KEY" \
         --progress
 
   - path: /root/upload-livrable.sh
@@ -410,52 +410,52 @@ write_files:
     content: |
       #!/bin/bash
       source /root/.env 2>/dev/null || { echo "Run setup-s3.sh first"; exit 1; }
-      [ -z "$$1" ] && { echo "Usage: $$0 <file>"; exit 1; }
-      TIMESTAMP=$$(date +%Y%m%d_%H%M%S)
-      rclone copy "$$1" zone1:${var.livrables_bucket_name}/$$TIMESTAMP/ \
+      [ -z "$1" ] && { echo "Usage: $0 <file>"; exit 1; }
+      TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+      rclone copy "$1" zone1:${var.livrables_bucket_name}/$TIMESTAMP/ \
         --s3-sse-customer-algorithm AES256 \
-        --s3-sse-customer-key "$$LIVRABLES_KEY" \
+        --s3-sse-customer-key "$LIVRABLES_KEY" \
         --progress
 
   - path: /root/setup-s3.sh
     permissions: '0755'
     content: |
       #!/bin/bash
-      [ -z "$$1" ] || [ -z "$$2" ] && { echo "Usage: $$0 <ACCESS_KEY> <SECRET_KEY>"; exit 1; }
+      [ -z "$1" ] || [ -z "$2" ] && { echo "Usage: $0 <ACCESS_KEY> <SECRET_KEY>"; exit 1; }
       cat > /root/.env << EOF
-      export AWS_ACCESS_KEY_ID=$$1
-      export AWS_SECRET_ACCESS_KEY=$$2
+      export AWS_ACCESS_KEY_ID=$1
+      export AWS_SECRET_ACCESS_KEY=$2
       export ENCRYPTION_KEY="${var.zone1_encryption_key_base64}"
       export LIVRABLES_KEY="${var.zone1_encryption_key_base64}"
       EOF
       cat >> /root/.config/rclone/rclone.conf << EOF
-      access_key_id = $$1
-      secret_access_key = $$2
+      access_key_id = $1
+      secret_access_key = $2
       EOF
       echo "S3 configured. Run: source /root/.env"
 
   - path: /etc/motd
     content: |
-      ══════════════════════════════════════════════════════════════
+      ==============================================================
         HACKATHON HDS - GPU - ${replace(var.team_name, "&", "and")}
-      ══════════════════════════════════════════════════════════════
+      ==============================================================
         GPU: ${var.gpu_instance_type}
         Setup: ./setup-s3.sh <ACCESS_KEY> <SECRET_KEY>
         Sync data: ./sync-data.sh
         Upload: ./upload-livrable.sh <file>
         Deadline: ${var.challenge_end_date}
-      ══════════════════════════════════════════════════════════════
+      ==============================================================
 
 runcmd:
   - mkdir -p /data/patients /root/.config/rclone
   # Wait for private network interface to be ready
   - |
-    for i in $$(seq 1 30); do
+    for i in $(seq 1 30); do
       if ip -o addr show | grep -q 'inet 10\.'; then
         echo "Private interface ready"
         break
       fi
-      echo "Waiting for private interface... ($$i/30)"
+      echo "Waiting for private interface... ($i/30)"
       sleep 2
     done
   # Setup gateway route and enable persistence

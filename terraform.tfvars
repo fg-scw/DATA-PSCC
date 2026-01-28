@@ -8,7 +8,7 @@ organization_id = "79a00b89-8d66-471f-888a-758f48a8e039"
 region          = "fr-par"
 zone            = "fr-par-2"
 project_prefix  = "hackathon-hds"
-bucket_prefix   = "final-pscc-data-2026"  # Must be globally unique
+bucket_prefix   = "pscc-data-2026"  # Must be globally unique
 
 # Deployment
 dry_run               = true   # false = send invitations
